@@ -89,6 +89,7 @@ function render() {
   dirty = false;
   needsInput = false;
 
+  // Read terminal dimensions fresh every render
   const rows = process.stdout.rows;
 
   const title = ` ${DIM}twitch-term — #${CHANNEL}${RESET}`;
@@ -124,13 +125,13 @@ function render() {
 }
 
 let needsInput = true;
-let renderScheduled = false;
+let renderPending = false;
 
 function scheduleRender() {
-  if (renderScheduled) return;
-  renderScheduled = true;
+  if (renderPending) return;
+  renderPending = true;
   setImmediate(() => {
-    renderScheduled = false;
+    renderPending = false;
     render();
   });
 }
@@ -207,6 +208,8 @@ process.stdin.on('keypress', (_str, key) => {
 });
 
 process.stdout.on('resize', () => {
+  // Reset renderPending so resize always triggers a fresh render
+  renderPending = false;
   dirty = true;
   scheduleRender();
 });
