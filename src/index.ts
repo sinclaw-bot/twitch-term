@@ -42,31 +42,68 @@ const RESET = '\x1b[0m';
 const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
 
-const USER_COLORS = [
-  '\x1b[31m',
-  '\x1b[32m',
-  '\x1b[33m',
-  '\x1b[34m',
-  '\x1b[35m',
-  '\x1b[36m',
-  '\x1b[91m',
-  '\x1b[92m',
-  '\x1b[93m',
-  '\x1b[94m',
-  '\x1b[95m',
-  '\x1b[96m',
-];
+/** Convert a hex color like `#FF0000` to a true-color ANSI escape sequence. */
+function hexToAnsi(hex: string): string {
+  const val = parseInt(hex.replace('#', ''), 16);
+  const r = (val >> 16) & 0xff;
+  const g = (val >> 8) & 0xff;
+  const b = val & 0xff;
+  return `\x1b[38;2;${r};${g};${b}m`;
+}
 
-function hashColor(name: string): string {
-  let h = 0;
-  for (const c of name) h = (h << 5) - h + c.charCodeAt(0);
-  return USER_COLORS[(Math.abs(h) >>> 0) % USER_COLORS.length];
+/**
+ * Parse Twitch badges (an object like `{moderator: "1", subscriber: "12"}`)
+ * and return badge symbols for display next to usernames.
+ */
+const PREDICTION_SYMBOLS = ['➀', '➁', '➂', '➃', '➄', '➅'];
+
+function badgesToEmoji(badges: Record<string, string> | undefined): string {
+  if (!badges) return '';
+  const symbols: string[] = [];
+  for (const [name, value] of Object.entries(badges)) {
+    switch (name) {
+      case 'broadcaster':
+        symbols.push('★');
+        break;
+      case 'moderator':
+        symbols.push('▨');
+        break;
+      case 'vip':
+        symbols.push('▼');
+        break;
+      case 'subscriber':
+      case 'founder':
+        symbols.push('◆');
+        break;
+      case 'bits':
+        symbols.push('✦');
+        break;
+      case 'predictions': {
+        const idx = Number.parseInt(value, 10);
+        symbols.push(PREDICTION_SYMBOLS[Math.min(Math.max(idx - 1, 0), 5)] ?? '➀');
+        break;
+      }
+      case 'artist':
+        symbols.push('♪');
+        break;
+    }
+  }
+  return symbols.join('');
+}
+
+/** Safe getTermSize that works even if process.stdout is wrapped. */
+function getTermSize(): [number, number] {
+  try {
+    return process.stdout.getWindowSize();
+  } catch {
+    return [process.stdout.columns ?? 80, process.stdout.rows ?? 24];
+  }
 }
 
 // ── Chat State ──
 
 type ChatLine =
-  | { type: 'msg'; user: string; text: string }
+  | { type: 'msg'; user: string; text: string; color?: string; badges?: Record<string, string> }
   | { type: 'system'; text: string }
   | { type: 'join'; user: string }
   | { type: 'part'; user: string };
@@ -89,8 +126,7 @@ function render() {
   dirty = false;
   needsInput = false;
 
-  // Read terminal dimensions fresh every render
-  const rows = process.stdout.rows;
+  const [cols, rows] = getTermSize();
 
   const title = ` ${DIM}twitch-term — #${CHANNEL}${RESET}`;
   const inputRow = rows;
@@ -105,8 +141,9 @@ function render() {
 
   for (const line of visible) {
     if (line.type === 'msg') {
-      const color = hashColor(line.user);
-      out += `${color}${BOLD}${line.user}:${RESET} ${line.text}\n`;
+      const color = line.color ? hexToAnsi(line.color) : '';
+      const emoji = badgesToEmoji(line.badges);
+      out += `${emoji} ${color}${BOLD}${line.user}:${RESET} ${line.text}\n`;
     } else if (line.type === 'system') {
       out += `\x1b[32m[${line.text}]\x1b[0m\n`;
     } else if (line.type === 'join') {
@@ -116,7 +153,7 @@ function render() {
     }
   }
 
-  out += `${DIM}─${'─'.repeat(process.stdout.columns - 2)}${RESET}\n`;
+  out += `${DIM}─${'─'.repeat(cols - 2)}${RESET}\n`;
   out += `${BOLD}${prompt}${RESET}${input}`;
 
   const cx = prompt.length + input.length + 1;
@@ -125,13 +162,13 @@ function render() {
 }
 
 let needsInput = true;
-let renderPending = false;
+let renderScheduled = false;
 
 function scheduleRender() {
-  if (renderPending) return;
-  renderPending = true;
+  if (renderScheduled) return;
+  renderScheduled = true;
   setImmediate(() => {
-    renderPending = false;
+    renderScheduled = false;
     render();
   });
 }
@@ -153,7 +190,8 @@ function append(line: ChatLine) {
 
 client.on('message', (_channel, tags, message) => {
   const user = tags['display-name'] ?? tags.username ?? '?';
-  append({ type: 'msg', user, text: message });
+  const badges = tags.badges as Record<string, string> | undefined;
+  append({ type: 'msg', user, text: message, color: tags.color ?? undefined, badges });
 });
 
 client.on('join', (_channel, user) => append({ type: 'join', user }));
@@ -208,8 +246,6 @@ process.stdin.on('keypress', (_str, key) => {
 });
 
 process.stdout.on('resize', () => {
-  // Reset renderPending so resize always triggers a fresh render
-  renderPending = false;
   dirty = true;
   scheduleRender();
 });
@@ -234,7 +270,7 @@ scheduleRender();
 // Keep cursor responsive even when no chat activity
 setInterval(() => {
   if (!dirty) {
-    const rows = process.stdout.rows;
+    const [, rows] = getTermSize();
     const prompt = '> ';
     const cx = prompt.length + input.length + 1;
     process.stdout.write(`\x1b[${rows};${cx}H`);
